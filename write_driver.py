@@ -1,0 +1,142 @@
+﻿with open(r'D:\Espressif\esp-idf-5.5.2\Repo\ndt-eye\main\lcd_driver.c', 'w', encoding='utf-8') as f:
+    f.write('''#include " lcd_driver.h\
+#include <esp_log.h>
+#include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
+#include <driver/gpio.h>
+#include <driver/ledc.h>
+#include <driver/spi_master.h>
+#include <esp_lcd_panel_io.h>
+#include <esp_lcd_panel_vendor.h>
+#include <esp_lcd_panel_ops.h>
+#include <esp_lcd_st77916.h>
+#include <esp_timer.h>
+#include <string.h>
+
+static const char *TAG = \LCD_DRIVER\;
+
+#define PIN_NUM_LCD_CS 10
+#define PIN_NUM_LCD_PCLK 9
+#define PIN_NUM_LCD_DATA0 11
+#define PIN_NUM_LCD_DATA1 12
+#define PIN_NUM_LCD_DATA2 13
+#define PIN_NUM_LCD_DATA3 14
+#define PIN_NUM_LCD_RST -1
+#define PIN_NUM_LCD_BL 15
+
+#define LCD_PCLK_HZ (80 * 1000 * 1000)
+
+#define LCD_H_RES 360
+#define LCD_V_RES 360
+
+#define CHUNK_LINES 72
+#define CHUNK_SIZE (LCD_H_RES * CHUNK_LINES * 2)
+
+static esp_lcd_panel_io_handle_t s_io_handle = NULL;
+static esp_lcd_panel_handle_t s_panel_handle = NULL;
+
+static uint8_t *s_staging_bufs[2] = {NULL, NULL};
+
+esp_err_t lcd_driver_init(esp_lcd_panel_io_color_trans_done_cb_t trans_done_cb, void *user_ctx)
+{
+ ESP_LOGI(TAG, \Initializing ST77916 QSPI LCD driver...\);
+
+ for (int i = 0; i < 2; i++) {
+ s_staging_bufs[i] = (uint8_t *)heap_caps_aligned_alloc(64, CHUNK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+ if (!s_staging_bufs[i]) {
+ ESP_LOGE(TAG, \Failed to allocate staging buffer %d\, i);
+ return ESP_ERR_NO_MEM;
+ }
+ }
+ ESP_LOGI(TAG, \Allocated 2x %d KB SRAM Staging Buffers successfully\, CHUNK_SIZE / 1024);
+
+ gpio_config_t bl_gpio_cfg = {
+ .pin_bit_mask = (1ULL << PIN_NUM_LCD_BL),
+ .mode = GPIO_MODE_OUTPUT,
+ .pull_up_en = GPIO_PULLUP_DISABLE,
+ .pull_down_en = GPIO_PULLDOWN_DISABLE,
+ .intr_type = GPIO_INTR_DISABLE,
+ };
+ gpio_config(&bl_gpio_cfg);
+ gpio_set_level(PIN_NUM_LCD_BL, 1);
+
+ esp_lcd_panel_io_qspi_config_t qspi_config = {
+ .cs_gpio_num = PIN_NUM_LCD_CS,
+ .pclk_gpio_num = PIN_NUM_LCD_PCLK,
+ .data0_gpio_num = PIN_NUM_LCD_DATA0,
+ .data1_gpio_num = PIN_NUM_LCD_DATA1,
+ .data2_gpio_num = PIN_NUM_LCD_DATA2,
+ .data3_gpio_num = PIN_NUM_LCD_DATA3,
+ .lcd_cmd_bits = 32,
+ .lcd_param_bits = 8,
+ .pclk_hz = LCD_PCLK_HZ,
+ .trans_queue_depth = 10,
+ .on_color_trans_done = trans_done_cb,
+ .user_ctx = user_ctx,
+ .flags = {
+ .quad_mode = 1,
+ },
+ };
+
+ esp_lcd_panel_dev_config_t panel_config = {
+ .reset_gpio_num = PIN_NUM_LCD_RST,
+ .rgb_endian = LCD_RGB_ENDIAN_BGR,
+ .bits_per_pixel = 16,
+ };
+
+ esp_err_t ret = esp_lcd_new_panel_io_qspi(SPI2_HOST, &qspi_config, &s_io_handle);
+ if (ret != ESP_OK) {
+ ESP_LOGE(TAG, \Failed to create panel IO: %s\, esp_err_to_name(ret));
+ return ret;
+ }
+
+ st77916_vendor_config_t vendor_config = {
+ .flags = {
+ .use_qspi_interface = 1,
+ },
+ };
+ panel_config.vendor_config = &vendor_config;
+
+ ret = esp_lcd_new_panel_st77916(s_io_handle, &panel_config, &s_panel_handle);
+ if (ret != ESP_OK) {
+ ESP_LOGE(TAG, \Failed to create panel handle: %s\, esp_err_to_name(ret));
+ return ret;
+ }
+
+ esp_lcd_panel_reset(s_panel_handle);
+ esp_lcd_panel_init(s_panel_handle);
+ esp_lcd_panel_disp_on_off(s_panel_handle, true);
+
+ ESP_LOGI(TAG, \ST77916 LCD panel initialized successfully\);
+ return ESP_OK;
+}
+
+esp_err_t lcd_driver_draw_frame(const void *frame_buf)
+{
+ if (!s_panel_handle || !frame_buf) {
+ return ESP_ERR_INVALID_ARG;
+ }
+
+ const uint8_t *src_ptr = (const uint8_t *)frame_buf;
+
+ for (int i = 0; i < 5; i++) {
+ int buf_idx = i % 2;
+ int y_start = i * CHUNK_LINES;
+ int y_end = y_start + CHUNK_LINES;
+
+ memcpy(s_staging_bufs[buf_idx], src_ptr + (i * CHUNK_SIZE), CHUNK_SIZE);
+ esp_lcd_panel_draw_bitmap(s_panel_handle, 0, y_start, LCD_H_RES, y_end, s_staging_bufs[buf_idx]);
+ }
+
+ return ESP_OK;
+}
+
+void lcd_driver_set_brightness(uint8_t brightness_pct)
+{
+ if (brightness_pct > 0) {
+ gpio_set_level(PIN_NUM_LCD_BL, 1);
+ } else {
+ gpio_set_level(PIN_NUM_LCD_BL, 0);
+ }
+}
+''')
